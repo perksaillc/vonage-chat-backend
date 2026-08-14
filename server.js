@@ -144,6 +144,8 @@ app.post('/send', async (req, res) => {
 app.post('/webhook/inbound', (req, res) => res.status(200).send('ok'));
 app.post('/webhook/status', (req, res) => res.status(200).send('ok'));
 
+app.get('/dashboard', (req, res) => res.sendFile(path.join(__dirname, 'public', 'dashboard.html')));
+
 app.get('/', (req, res) => res.send('Vonage live chat backend is running'));
 
 const PORT = process.env.PORT || 3000;
