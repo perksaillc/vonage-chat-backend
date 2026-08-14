@@ -13,56 +13,61 @@
   #app { display: none; height: 100vh; }
   #sidebar { width: 300px; border-right: 1px solid #ddd; display: flex; flex-direction: column; }
   #sidebar-header { padding: 12px 16px; border-bottom: 1px solid #eee; }
-  #sidebar-header .who { font-size: 13px; color: #666; margin-bottom: 8px; }
+  #sidebar-header .who { font-size: 13px; color: #666; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+  #sidebar-header .who button { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 0; }
+  #presence { font-size: 11px; color: #888; margin-bottom: 8px; }
   #search { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
   #session-list { flex: 1; overflow-y: auto; }
-  .session { padding: 12px 16px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .session { padding: 12px 16px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
   .session:hover { background: #f5f5f5; }
   .session.active { background: #e8f0fe; }
+  .session.closed { opacity: 0.55; }
+  .session .left { min-width: 0; flex: 1; }
   .session .name { font-weight: 600; font-size: 14px; }
   .session .preview { font-size: 12px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session .badge { background: #2563eb; color: #fff; font-size: 11px; border-radius: 999px; min-width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; padding: 0 5px; flex-shrink: 0; }
   #main { flex: 1; display: flex; flex-direction: column; }
-  #thread-header { padding: 12px 16px; border-bottom: 1px solid #eee; display: none; justify-content: space-between; align-items: center; }
-  #thread-header button { background: none; border: 1px solid #ccc; border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  #thread-header { padding: 10px 16px; border-bottom: 1px solid #eee; font-size: 13px; color: #666; display: none; justify-content: space-between; align-items: center; }
+  #thread-header button { font-size: 12px; padding: 6px 10px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; }
   #thread { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; }
-  .msg-row { display: flex; flex-direction: column; margin-bottom: 10px; }
-  .msg { max-width: 60%; padding: 8px 12px; border-radius: 10px; font-size: 14px; }
+  .msg { max-width: 60%; margin-bottom: 10px; padding: 8px 12px; border-radius: 10px; font-size: 14px; }
   .msg.visitor { background: #f0f0f0; align-self: flex-start; }
-  .msg.agent { background: #2563eb; color: #fff; align-self: flex-end; margin-left: auto; }
-  .msg.system { background: none; color: #999; font-size: 12px; align-self: center; font-style: italic; }
-  .meta { font-size: 11px; color: #999; margin-top: 2px; }
-  .msg-row.visitor .meta { align-self: flex-start; }
-  .msg-row.agent .meta { align-self: flex-end; }
+  .msg.agent { background: #2563eb; color: #fff; margin-left: auto; }
+  .msg.system { align-self: center; background: none; color: #999; font-style: italic; font-size: 12px; }
+  .msg .meta { font-size: 10px; opacity: 0.7; margin-top: 3px; }
   #composer { display: none; padding: 12px; border-top: 1px solid #ddd; gap: 8px; }
   #composer input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
-  #composer button { background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 0 16px; cursor: pointer; font-size: 14px; }
+  #composer button { margin-left: 8px; padding: 10px 16px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
   #empty { padding: 24px; color: #888; }
 </style>
 </head>
 <body>
 
 <div id="login">
-  <form id="login-form">
-    <h3 style="margin:0 0 6px;">Agent sign in</h3>
-    <input id="login-username" placeholder="Username" autocomplete="username" />
-    <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" />
+  <form id="loginForm">
+    <h3 style="margin:0 0 4px;">Agent login</h3>
+    <input id="loginUser" placeholder="Username" autocomplete="username" />
+    <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password" />
     <button type="submit">Sign in</button>
-    <div class="error" id="login-error"></div>
+    <div class="error" id="loginError"></div>
   </form>
 </div>
 
 <div id="app">
   <div id="sidebar">
     <div id="sidebar-header">
-      <div class="who" id="who"></div>
+      <div class="who">
+        <span id="whoami"></span>
+        <button id="signOutBtn">Sign out</button>
+      </div>
+      <div id="presence"></div>
       <input id="search" placeholder="Search conversations..." />
     </div>
     <div id="session-list"></div>
   </div>
   <div id="main">
     <div id="thread-header">
-      <strong id="thread-title"></strong>
-      <button id="export-btn">Export</button>
+      <span id="threadStatus"></span>
     </div>
     <div id="thread"><div id="empty">Select a conversation</div></div>
     <div id="composer">
@@ -75,54 +80,91 @@
 <script>
   let token = localStorage.getItem('agentToken');
   let agentName = localStorage.getItem('agentName');
-  let ws;
+  let ws = null;
+
   let sessions = {};
   let activeId = null;
   let activeMessages = [];
-  let joinedSessions = new Set();
+  let viewingMap = {}; // sessionId -> agentName currently viewing it
+  let searchMode = false;
 
   function fmtTime(ts) {
-    return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const d = new Date(ts);
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
-  document.getElementById('login-form').addEventListener('submit', async (e) => {
+  function showApp() {
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    document.getElementById('whoami').textContent = agentName || '';
+    connectWs();
+  }
+
+  if (token && agentName) showApp();
+
+  document.getElementById('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const username = document.getElementById('login-username').value.trim();
-    const password = document.getElementById('login-password').value;
-    const errEl = document.getElementById('login-error');
+    const username = document.getElementById('loginUser').value.trim();
+    const password = document.getElementById('loginPass').value;
+    const errEl = document.getElementById('loginError');
     errEl.textContent = '';
     try {
       const res = await fetch('/agent/login', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
-      if (!res.ok) { errEl.textContent = 'Invalid username or password'; return; }
       const data = await res.json();
+      if (!res.ok) { errEl.textContent = data.error || 'Login failed'; return; }
       token = data.token; agentName = data.name;
       localStorage.setItem('agentToken', token);
       localStorage.setItem('agentName', agentName);
-      boot();
-    } catch { errEl.textContent = 'Could not reach the server'; }
+      showApp();
+    } catch (err) {
+      errEl.textContent = 'Could not reach server';
+    }
   });
 
-  function boot() {
-    document.getElementById('login').style.display = 'none';
-    document.getElementById('app').style.display = 'flex';
-    document.getElementById('who').textContent = 'Signed in as ' + agentName;
+  document.getElementById('signOutBtn').onclick = async () => {
+    try { await fetch('/agent/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch {}
+    localStorage.removeItem('agentToken');
+    localStorage.removeItem('agentName');
+    location.reload();
+  };
 
+  function connectWs() {
     const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${wsProtocol}://${location.host}/agent-ws?token=${token}`);
 
     ws.onclose = () => {
-      localStorage.removeItem('agentToken');
-      document.getElementById('login').style.display = 'flex';
+      // token likely expired (server restarted) — send back to login
       document.getElementById('app').style.display = 'none';
+      document.getElementById('login').style.display = 'flex';
+      localStorage.removeItem('agentToken');
+      localStorage.removeItem('agentName');
     };
 
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'init') { msg.sessions.forEach(s => sessions[s.sessionId] = s); renderSidebar(); }
-      if (msg.type === 'session_update') { sessions[msg.session.sessionId] = msg.session; renderSidebar(); }
+
+      if (msg.type === 'init') {
+        msg.sessions.forEach(s => sessions[s.sessionId] = s);
+        renderSidebar();
+      }
+
+      if (msg.type === 'session_update') {
+        sessions[msg.session.sessionId] = msg.session;
+        renderSidebar();
+      }
+
+      if (msg.type === 'presence') {
+        document.getElementById('presence').textContent = msg.agents.length
+          ? 'Online: ' + msg.agents.join(', ') : '';
+      }
+
+      if (msg.type === 'viewing') {
+        viewingMap[msg.sessionId] = msg.agentName;
+      }
+
       if (msg.type === 'message') {
         sessions[msg.sessionId] = sessions[msg.sessionId] || { sessionId: msg.sessionId };
         sessions[msg.sessionId].lastMessage = msg.text;
@@ -130,42 +172,49 @@
         sessions[msg.sessionId].lastActivity = msg.ts;
         if (msg.name) sessions[msg.sessionId].name = msg.name;
         renderSidebar();
-        if (msg.sessionId === activeId) { activeMessages.push(msg); renderThread(); }
+
+        if (msg.sessionId === activeId) {
+          activeMessages.push(msg);
+          renderThread();
+        }
       }
-      if (msg.type === 'history') { if (msg.sessionId === activeId) { activeMessages = msg.messages; renderThread(); } }
+
+      if (msg.type === 'history') {
+        if (msg.sessionId === activeId) {
+          activeMessages = msg.messages;
+          renderThread();
+        }
+      }
     };
   }
-  if (token && agentName) boot();
 
-  function renderSidebar(filter) {
+  function renderSidebar() {
     const el = document.getElementById('session-list');
-    let list = Object.values(sessions).sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
-    if (filter) {
-      const f = filter.toLowerCase();
-      list = list.filter(s => (s.name || '').toLowerCase().includes(f) || (s.lastMessage || '').toLowerCase().includes(f));
-    }
+    const list = Object.values(sessions).sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
     el.innerHTML = list.map(s => `
-      <div class="session ${s.sessionId === activeId ? 'active' : ''}" data-id="${s.sessionId}">
-        <div class="name">${s.name || 'Visitor'}</div>
-        <div class="preview">${s.lastFrom === 'agent' ? 'You: ' : ''}${(s.lastMessage || '').replace(/</g,'&lt;')}</div>
+      <div class="session ${s.sessionId === activeId ? 'active' : ''} ${s.closed ? 'closed' : ''}" data-id="${s.sessionId}">
+        <div class="left">
+          <div class="name">${s.name || 'Visitor'}${s.closed ? ' (closed)' : ''}</div>
+          <div class="preview">${s.lastFrom === 'agent' ? 'You: ' : ''}${(s.lastMessage || '').replace(/</g,'&lt;')}</div>
+        </div>
+        ${s.unread ? `<div class="badge">${s.unread}</div>` : ''}
       </div>
     `).join('');
-    el.querySelectorAll('.session').forEach(node => { node.onclick = () => openSession(node.dataset.id); });
+    el.querySelectorAll('.session').forEach(node => {
+      node.onclick = () => openSession(node.dataset.id);
+    });
   }
-
-  document.getElementById('search').addEventListener('input', (e) => renderSidebar(e.target.value));
 
   function openSession(sessionId) {
     activeId = sessionId;
     activeMessages = [];
     document.getElementById('composer').style.display = 'flex';
     document.getElementById('thread-header').style.display = 'flex';
-    document.getElementById('thread-title').textContent = (sessions[sessionId] && sessions[sessionId].name) || 'Visitor';
+    const s = sessions[sessionId];
+    document.getElementById('threadStatus').textContent = s && s.closed ? 'Closed conversation' : '';
     ws.send(JSON.stringify({ type: 'get_history', sessionId }));
-    if (!joinedSessions.has(sessionId)) {
-      ws.send(JSON.stringify({ type: 'join', sessionId }));
-      joinedSessions.add(sessionId);
-    }
+    ws.send(JSON.stringify({ type: 'join', sessionId }));
+    if (sessions[sessionId]) sessions[sessionId].unread = 0;
     renderSidebar();
     renderThread();
   }
@@ -173,12 +222,11 @@
   function renderThread() {
     const el = document.getElementById('thread');
     el.innerHTML = activeMessages.map(m => {
-      if (m.from === 'system') return `<div class="msg-row" style="align-items:center;"><div class="msg system">${(m.text||'').replace(/</g,'&lt;')}</div></div>`;
-      const label = m.from === 'agent' ? (m.agentName || 'Agent') : (sessions[activeId] && sessions[activeId].name) || 'Visitor';
-      return `<div class="msg-row ${m.from}">
-        <div class="msg ${m.from}">${(m.text||'').replace(/</g,'&lt;')}</div>
-        <div class="meta">${label} · ${fmtTime(m.ts)}</div>
-      </div>`;
+      if (m.from === 'system') {
+        return `<div class="msg system">${(m.text || '').replace(/</g,'&lt;')}</div>`;
+      }
+      const label = m.from === 'agent' ? (m.agentName || 'Agent') : (sessions[activeId]?.name || 'Visitor');
+      return `<div class="msg ${m.from}">${(m.text || '').replace(/</g,'&lt;')}<div class="meta">${label} · ${fmtTime(m.ts)}</div></div>`;
     }).join('');
     el.scrollTop = el.scrollHeight;
   }
@@ -190,22 +238,36 @@
     ws.send(JSON.stringify({ type: 'reply', sessionId: activeId, text }));
     input.value = '';
   }
-  document.getElementById('sendBtn').onclick = sendReply;
-  document.getElementById('replyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendReply(); });
 
-  document.getElementById('export-btn').onclick = () => {
-    if (!activeId) return;
-    const name = (sessions[activeId] && sessions[activeId].name) || 'visitor';
-    const lines = activeMessages.map(m => {
-      const who = m.from === 'agent' ? (m.agentName || 'Agent') : m.from === 'system' ? 'System' : name;
-      return `[${fmtTime(m.ts)}] ${who}: ${m.text}`;
-    });
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `conversation-${name}-${activeId}.txt`;
-    a.click();
-  };
+  document.getElementById('sendBtn').onclick = sendReply;
+  document.getElementById('replyInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendReply();
+  });
+
+  // ---- Search ----
+  let searchTimer = null;
+  document.getElementById('search').addEventListener('input', (e) => {
+    clearTimeout(searchTimer);
+    const q = e.target.value.trim();
+    if (!q) { searchMode = false; renderSidebar(); return; }
+    searchTimer = setTimeout(async () => {
+      const res = await fetch('/agent/search?q=' + encodeURIComponent(q), { headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) return;
+      const results = await res.json();
+      const el = document.getElementById('session-list');
+      el.innerHTML = results.map(r => `
+        <div class="session" data-id="${r.sessionId}">
+          <div class="left">
+            <div class="name">${r.name || 'Visitor'}</div>
+            <div class="preview">${(r.text || '').replace(/</g,'&lt;')}</div>
+          </div>
+        </div>
+      `).join('') || '<div style="padding:16px;color:#888;font-size:13px;">No matches</div>';
+      el.querySelectorAll('.session').forEach(node => {
+        node.onclick = () => { document.getElementById('search').value = ''; openSession(node.dataset.id); };
+      });
+    }, 250);
+  });
 </script>
 
 </body>
