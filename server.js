@@ -20,17 +20,21 @@ const wss = new WebSocket.Server({ noServer: true });
 const VONAGE_API_KEY = process.env.VONAGE_API_KEY;
 const VONAGE_API_SECRET = process.env.VONAGE_API_SECRET;
 const VONAGE_NUMBER = process.env.VONAGE_NUMBER;
-const AGENT_PHONE = process.env.AGENT_PHONE;
+const AGENT_PHONES = (process.env.AGENT_PHONES || process.env.AGENT_PHONE || '')
+  .split(',').map(s => s.trim()).filter(Boolean); // supports multiple employee numbers
 const DASHBOARD_URL = process.env.DASHBOARD_URL;
 const DATABASE_URL = process.env.DATABASE_URL;
 const SEED_AGENT_USERNAME = process.env.SEED_AGENT_USERNAME;
 const SEED_AGENT_PASSWORD = process.env.SEED_AGENT_PASSWORD;
 const SEED_AGENT_NAME = process.env.SEED_AGENT_NAME || SEED_AGENT_USERNAME;
 
+const SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes of inactivity auto-closes a chat
+
 const vonage = new Vonage({ apiKey: VONAGE_API_KEY, apiSecret: VONAGE_API_SECRET });
 const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-const sessions = new Map();       // sessionId -> { ws, name, messages, lastActivity }
+// sessionId -> { ws, name, messages, lastActivity, unread, closed }
+const sessions = new Map();
 const agentSockets = new Map();   // ws -> { username, name }
 const tokens = new Map();         // token -> { username, name }
 
@@ -39,9 +43,12 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS sessions (
       session_id TEXT PRIMARY KEY,
       name TEXT,
-      last_activity BIGINT
+      last_activity BIGINT,
+      closed BOOLEAN DEFAULT FALSE
     );
   `);
+  // in case this table pre-dates the "closed" column
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS closed BOOLEAN DEFAULT FALSE;`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id SERIAL PRIMARY KEY,
@@ -63,7 +70,14 @@ async function initDb() {
 
   const { rows: sessionRows } = await pool.query('SELECT * FROM sessions');
   for (const row of sessionRows) {
-    sessions.set(row.session_id, { ws: null, name: row.name, messages: [], lastActivity: Number(row.last_activity) });
+    sessions.set(row.session_id, {
+      ws: null,
+      name: row.name,
+      messages: [],
+      lastActivity: Number(row.last_activity),
+      unread: 0,
+      closed: !!row.closed,
+    });
   }
   const { rows: messageRows } = await pool.query('SELECT * FROM messages ORDER BY id ASC');
   for (const row of messageRows) {
@@ -82,11 +96,11 @@ async function initDb() {
   }
 }
 
-async function persistSession(sessionId, name, lastActivity) {
+async function persistSession(sessionId, name, lastActivity, closed) {
   await pool.query(
-    `INSERT INTO sessions (session_id, name, last_activity) VALUES ($1, $2, $3)
-     ON CONFLICT (session_id) DO UPDATE SET name = COALESCE($2, sessions.name), last_activity = $3`,
-    [sessionId, name, lastActivity]
+    `INSERT INTO sessions (session_id, name, last_activity, closed) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (session_id) DO UPDATE SET name = COALESCE($2, sessions.name), last_activity = $3, closed = $4`,
+    [sessionId, name, lastActivity, !!closed]
   );
 }
 async function persistMessage(sessionId, from, text, ts, agentName) {
@@ -111,11 +125,41 @@ function sessionSummary(sessionId) {
     lastMessage: last ? last.text : '',
     lastFrom: last ? last.from : null,
     lastActivity: s.lastActivity,
+    unread: s.unread || 0,
+    closed: !!s.closed,
   };
 }
 function allSessionSummaries() {
   return Array.from(sessions.keys()).map(sessionSummary);
 }
+
+async function closeSession(sessionId, reason) {
+  const s = sessions.get(sessionId);
+  if (!s || s.closed) return;
+  s.closed = true;
+  const entry = { from: 'system', text: reason, ts: Date.now() };
+  s.messages.push(entry);
+  s.lastActivity = entry.ts;
+  try {
+    await persistMessage(sessionId, 'system', reason, entry.ts, null);
+    await persistSession(sessionId, s.name, entry.ts, true);
+  } catch (err) { console.error('DB write failed:', err); }
+  if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+    s.ws.send(JSON.stringify({ from: 'system', text: reason, closed: true }));
+  }
+  broadcastToAgents({ type: 'message', sessionId, ...entry });
+  broadcastToAgents({ type: 'session_update', session: sessionSummary(sessionId) });
+}
+
+// Sweep for inactive sessions every minute
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, s] of sessions.entries()) {
+    if (!s.closed && now - s.lastActivity > SESSION_TIMEOUT_MS) {
+      closeSession(sessionId, 'Conversation closed after 15 minutes of inactivity').catch(console.error);
+    }
+  }
+}, 60 * 1000);
 
 // ---- Agent auth ----
 app.post('/agent/login', async (req, res) => {
@@ -136,8 +180,14 @@ function requireAgent(req, res, next) {
   const agent = tokens.get(token);
   if (!agent) return res.status(401).json({ error: 'unauthorized' });
   req.agent = agent;
+  req.token = token;
   next();
 }
+
+app.post('/agent/logout', requireAgent, (req, res) => {
+  tokens.delete(req.token);
+  res.json({ ok: true });
+});
 
 app.post('/agent/register', requireAgent, async (req, res) => {
   const { username, password, displayName } = req.body;
@@ -173,14 +223,27 @@ server.on('upgrade', (req, socket, head) => {
       if (!sessionId) { ws.close(); return; }
 
       if (!sessions.has(sessionId)) {
-        sessions.set(sessionId, { ws, name: name || null, messages: [], lastActivity: Date.now() });
-        persistSession(sessionId, name || null, Date.now()).catch(console.error);
+        sessions.set(sessionId, { ws, name: name || null, messages: [], lastActivity: Date.now(), unread: 0, closed: false });
+        persistSession(sessionId, name || null, Date.now(), false).catch(console.error);
       } else {
-        sessions.get(sessionId).ws = ws;
-        if (name) sessions.get(sessionId).name = name;
+        const s = sessions.get(sessionId);
+        s.ws = ws;
+        if (name) s.name = name;
       }
+
       broadcastToAgents({ type: 'session_update', session: sessionSummary(sessionId) });
-      ws.on('close', () => { if (sessions.has(sessionId)) sessions.get(sessionId).ws = null; });
+
+      ws.on('message', (raw) => {
+        let msg;
+        try { msg = JSON.parse(raw); } catch { return; }
+        if (msg.type === 'end_chat') {
+          closeSession(sessionId, `${sessions.get(sessionId)?.name || 'Visitor'} ended the conversation`).catch(console.error);
+        }
+      });
+
+      ws.on('close', () => {
+        if (sessions.has(sessionId)) sessions.get(sessionId).ws = null;
+      });
     });
   } else if (url.pathname === '/agent-ws') {
     const token = url.searchParams.get('token');
@@ -190,6 +253,7 @@ server.on('upgrade', (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, (ws) => {
       agentSockets.set(ws, agent);
       ws.send(JSON.stringify({ type: 'init', sessions: allSessionSummaries(), you: agent.name }));
+      broadcastToAgents({ type: 'presence', agents: Array.from(agentSockets.values()).map(a => a.name) });
 
       ws.on('message', async (raw) => {
         let msg;
@@ -197,7 +261,9 @@ server.on('upgrade', (req, socket, head) => {
 
         if (msg.type === 'get_history') {
           const s = sessions.get(msg.sessionId);
+          if (s) { s.unread = 0; broadcastToAgents({ type: 'session_update', session: sessionSummary(msg.sessionId) }); }
           ws.send(JSON.stringify({ type: 'history', sessionId: msg.sessionId, messages: s ? s.messages : [] }));
+          broadcastToAgents({ type: 'viewing', sessionId: msg.sessionId, agentName: agent.name });
         }
 
         if (msg.type === 'join') {
@@ -208,7 +274,7 @@ server.on('upgrade', (req, socket, head) => {
           s.lastActivity = entry.ts;
           try {
             await persistMessage(msg.sessionId, 'system', entry.text, entry.ts, null);
-            await persistSession(msg.sessionId, s.name, entry.ts);
+            await persistSession(msg.sessionId, s.name, entry.ts, s.closed);
           } catch (err) { console.error('DB write failed:', err); }
           if (s.ws && s.ws.readyState === WebSocket.OPEN) {
             s.ws.send(JSON.stringify({ from: 'system', text: entry.text }));
@@ -224,7 +290,7 @@ server.on('upgrade', (req, socket, head) => {
           s.lastActivity = entry.ts;
           try {
             await persistMessage(msg.sessionId, 'agent', msg.text, entry.ts, agent.name);
-            await persistSession(msg.sessionId, s.name, entry.ts);
+            await persistSession(msg.sessionId, s.name, entry.ts, s.closed);
           } catch (err) { console.error('DB write failed:', err); }
           if (s.ws && s.ws.readyState === WebSocket.OPEN) {
             s.ws.send(JSON.stringify({ from: 'agent', agentName: agent.name, text: msg.text }));
@@ -233,7 +299,10 @@ server.on('upgrade', (req, socket, head) => {
         }
       });
 
-      ws.on('close', () => agentSockets.delete(ws));
+      ws.on('close', () => {
+        agentSockets.delete(ws);
+        broadcastToAgents({ type: 'presence', agents: Array.from(agentSockets.values()).map(a => a.name) });
+      });
     });
   } else {
     socket.destroy();
@@ -245,29 +314,33 @@ app.post('/send', async (req, res) => {
   if (!sessionId || !message) return res.status(400).json({ error: 'sessionId and message are required' });
 
   if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, { ws: null, name: name || null, messages: [], lastActivity: Date.now() });
+    sessions.set(sessionId, { ws: null, name: name || null, messages: [], lastActivity: Date.now(), unread: 0, closed: false });
   }
   const s = sessions.get(sessionId);
   if (name) s.name = name;
+  s.closed = false; // a new message reopens a timed-out conversation
+  s.unread = (s.unread || 0) + 1;
   const entry = { from: 'visitor', text: message, ts: Date.now() };
   s.messages.push(entry);
   s.lastActivity = entry.ts;
 
   try {
-    await persistSession(sessionId, s.name, entry.ts);
+    await persistSession(sessionId, s.name, entry.ts, false);
     await persistMessage(sessionId, 'visitor', message, entry.ts, null);
   } catch (err) { console.error('DB write failed:', err); }
 
   broadcastToAgents({ type: 'message', sessionId, ...entry, name: s.name });
+  broadcastToAgents({ type: 'session_update', session: sessionSummary(sessionId) });
 
-  if (agentSockets.size === 0) {
-    try {
-      await vonage.sms.send({
-        to: AGENT_PHONE,
-        from: VONAGE_NUMBER,
-        text: `New chat message${s.name ? ' from ' + s.name : ''}: ${message}${DASHBOARD_URL ? ' — reply at ' + DASHBOARD_URL : ''}`,
-      });
-    } catch (err) { console.error('Vonage notification failed:', err); }
+  if (agentSockets.size === 0 && AGENT_PHONES.length > 0) {
+    const text = `New chat message${s.name ? ' from ' + s.name : ''}: ${message}${DASHBOARD_URL ? ' — reply at ' + DASHBOARD_URL : ''}`;
+    for (const phone of AGENT_PHONES) {
+      try {
+        await vonage.sms.send({ to: phone, from: VONAGE_NUMBER, text });
+      } catch (err) {
+        console.error(`Vonage notification to ${phone} failed:`, err);
+      }
+    }
   }
 
   res.json({ ok: true });
