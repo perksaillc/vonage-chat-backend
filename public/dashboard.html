@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chat dashboard</title>
+<style>
+  body { margin: 0; font-family: -apple-system, sans-serif; display: flex; height: 100vh; }
+  #sidebar { width: 280px; border-right: 1px solid #ddd; overflow-y: auto; }
+  .session { padding: 12px 16px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .session:hover { background: #f5f5f5; }
+  .session.active { background: #e8f0fe; }
+  .session .name { font-weight: 600; font-size: 14px; }
+  .session .preview { font-size: 12px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #main { flex: 1; display: flex; flex-direction: column; }
+  #thread { flex: 1; overflow-y: auto; padding: 16px; }
+  .msg { max-width: 60%; margin-bottom: 10px; padding: 8px 12px; border-radius: 10px; font-size: 14px; }
+  .msg.visitor { background: #f0f0f0; align-self: flex-start; }
+  .msg.agent { background: #2563eb; color: #fff; margin-left: auto; }
+  #thread { display: flex; flex-direction: column; }
+  #composer { display: flex; padding: 12px; border-top: 1px solid #ddd; }
+  #composer input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  #composer button { margin-left: 8px; padding: 10px 16px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  #empty { padding: 24px; color: #888; }
+</style>
+</head>
+<body>
+
+<div id="sidebar"></div>
+<div id="main">
+  <div id="thread"><div id="empty">Select a conversation</div></div>
+  <div id="composer" style="display:none">
+    <input id="replyInput" placeholder="Type a reply..." />
+    <button id="sendBtn">Send</button>
+  </div>
+</div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const key = params.get('key');
+  const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${wsProtocol}://${location.host}/agent-ws?key=${key}`);
+
+  let sessions = {};   // sessionId -> summary
+  let activeId = null;
+  let activeMessages = [];
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === 'init') {
+      msg.sessions.forEach(s => sessions[s.sessionId] = s);
+      renderSidebar();
+    }
+
+    if (msg.type === 'session_update') {
+      sessions[msg.session.sessionId] = msg.session;
+      renderSidebar();
+    }
+
+    if (msg.type === 'message') {
+      sessions[msg.sessionId] = sessions[msg.sessionId] || { sessionId: msg.sessionId };
+      sessions[msg.sessionId].lastMessage = msg.text;
+      sessions[msg.sessionId].lastFrom = msg.from;
+      sessions[msg.sessionId].lastActivity = msg.ts;
+      if (msg.name) sessions[msg.sessionId].name = msg.name;
+      renderSidebar();
+
+      if (msg.sessionId === activeId) {
+        activeMessages.push(msg);
+        renderThread();
+      }
+    }
+
+    if (msg.type === 'history') {
+      if (msg.sessionId === activeId) {
+        activeMessages = msg.messages;
+        renderThread();
+      }
+    }
+  };
+
+  function renderSidebar() {
+    const el = document.getElementById('sidebar');
+    const list = Object.values(sessions).sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    el.innerHTML = list.map(s => `
+      <div class="session ${s.sessionId === activeId ? 'active' : ''}" data-id="${s.sessionId}">
+        <div class="name">${s.name || 'Visitor'}</div>
+        <div class="preview">${s.lastFrom === 'agent' ? 'You: ' : ''}${(s.lastMessage || '').replace(/</g,'&lt;')}</div>
+      </div>
+    `).join('');
+    el.querySelectorAll('.session').forEach(node => {
+      node.onclick = () => openSession(node.dataset.id);
+    });
+  }
+
+  function openSession(sessionId) {
+    activeId = sessionId;
+    activeMessages = [];
+    document.getElementById('composer').style.display = 'flex';
+    ws.send(JSON.stringify({ type: 'get_history', sessionId }));
+    renderSidebar();
+    renderThread();
+  }
+
+  function renderThread() {
+    const el = document.getElementById('thread');
+    el.innerHTML = activeMessages.map(m => `<div class="msg ${m.from}">${(m.text || '').replace(/</g,'&lt;')}</div>`).join('');
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function sendReply() {
+    const input = document.getElementById('replyInput');
+    const text = input.value.trim();
+    if (!text || !activeId) return;
+    ws.send(JSON.stringify({ type: 'reply', sessionId: activeId, text }));
+    input.value = '';
+  }
+
+  document.getElementById('sendBtn').onclick = sendReply;
+  document.getElementById('replyInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendReply();
+  });
+</script>
+
+</body>
+</html>
