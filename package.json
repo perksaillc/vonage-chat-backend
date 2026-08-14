@@ -1,15 +1,17 @@
 {
   "name": "vonage-live-chat-backend",
   "version": "1.0.0",
-  "description": "Backend that bridges a website chat widget with Vonage SMS",
+  "description": "Multi-agent live chat backend with Postgres persistence and Vonage SMS notifications",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "@vonage/server-sdk": "^3.19.0",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "pg": "^8.11.5",
     "ws": "^8.17.0"
   }
 }
